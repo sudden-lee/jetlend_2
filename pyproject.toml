@@ -1,0 +1,11 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [".uv-cache*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests parse XML that they generated themselves only to build deliberately corrupt fixtures.
+"mailings/tests.py" = ["S314"]
