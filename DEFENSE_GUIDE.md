@@ -410,7 +410,7 @@ Excel может потерять точность длинного числа �
 6. `created` равен числу строк результата, `skipped = len(batch) - created`.
 7. Только после успешного statement пакет очищается.
 
-Имена таблицы и колонок создаются через `psycopg.sql.Identifier`, а все значения передаются bound parameters. Пользовательский текст не конкатенируется с SQL. На пакет приходится один INSERT вместо SELECT и построчных `.create()`; лимит 500 дает не более 6000 параметров.
+Имена таблицы и колонок создаются через `psycopg.sql.Identifier`, а все значения передаются bound parameters. Пользовательский текст не конкатенируется с SQL. На пакет приходится один INSERT вместо SELECT и построчных `.create()`; лимит 500 даёт не более 6500 параметров.
 
 Raw SQL здесь локализован в `save_batch()` ради PostgreSQL-возможности, которой ORM-вариант `bulk_create(ignore_conflicts=True)` не дает: точного числа вставленных объектов при конфликтах. Валидация остается до вставки, потому что ни raw INSERT, ни обычный ORM `.create()` не вызывают `full_clean()` автоматически. Семантика `ON CONFLICT` и `RETURNING` описана в [PostgreSQL INSERT](https://www.postgresql.org/docs/current/sql-insert.html).
 
@@ -1118,7 +1118,7 @@ PostgreSQL возвращает строки только для реально 
 
 ### 14. Зачем batch 500?
 
-Он ограничивает накопление Mailing в Python, длину statement и размер частичного commit. При 12 колонках получается не более 6000 bound parameters.
+Он ограничивает накопление Mailing в Python, длину statement и размер частичного commit. При 13 колонках получается не более 6500 bound parameters.
 
 ### 15. Сколько SQL-запросов на письмо?
 
