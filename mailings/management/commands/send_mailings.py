@@ -5,7 +5,7 @@ from mailings.sending import send_mailings
 
 
 class Command(BaseCommand):
-    help = "Отправка рассылок из очереди: имитация письма — задержка 5-20 секунд и запись в лог."
+    help = "Отправка рассылок из очереди: имитация письма - задержка 5-20 секунд и запись в лог."
 
     def handle(self, *args: object, **options: object) -> None:
         try:

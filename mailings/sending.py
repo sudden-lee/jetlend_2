@@ -17,7 +17,6 @@ class SendStats:
 
 
 def send_email(mailing: Mailing) -> None:
-    """Simulated transport required by the task: a random delay, then a log line."""
     time.sleep(random.randint(5, 20))  # noqa: S311
     logger.info("Send EMAIL mailing_id=%s", mailing.pk)
 

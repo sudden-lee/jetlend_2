@@ -27,11 +27,11 @@ class ImportStats:
 
 
 class WorkbookError(ValueError):
-    """The file itself cannot be imported (wrong extension, unreadable, bad headers)."""
+    pass
 
 
 class RowError(ValueError):
-    """A single row does not satisfy the column rules."""
+    pass
 
 
 def _parse_headers(row) -> dict[str, int]:
@@ -99,9 +99,8 @@ def _save_batch(batch: list[Mailing], stats: ImportStats) -> None:
         unique.setdefault(mailing.external_id, mailing)
     stats.skipped += len(batch) - len(unique)
 
-    # Each row is its own atomic insert-or-skip: the UNIQUE constraint is the
-    # only source of truth, so a concurrent import of the same external_id
-    # can never be double-counted as both created and skipped.
+    # Per-row atomic insert-or-skip: UNIQUE alone decides, so a concurrent
+    # insert of the same external_id can't be double-counted.
     for mailing in unique.values():
         try:
             with transaction.atomic():

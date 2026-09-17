@@ -8,7 +8,7 @@ from mailings.importing import WorkbookError, import_mailings
 
 
 class Command(BaseCommand):
-    help = "Импорт рассылок из XLSX-файла: первая строка — заголовки колонок."
+    help = "Импорт рассылок из XLSX-файла: первая строка - заголовки колонок."
 
     def add_arguments(self, parser: ArgumentParser) -> None:
         parser.add_argument("path", type=Path, help="Путь к XLSX-файлу")
