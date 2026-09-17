@@ -10,7 +10,7 @@ from traceback import format_exception
 from unittest.mock import patch
 from uuid import UUID, uuid4
 from xml.etree.ElementTree import Element, ParseError, SubElement, fromstring, tostring
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from defusedxml.common import DefusedXmlException
 from django.contrib import admin
@@ -30,6 +30,8 @@ from openpyxl.utils.exceptions import InvalidFileException
 
 from mailings.importing import (
     COLUMNS,
+    MAX_ARCHIVE_ENTRIES,
+    MAX_COLUMNS,
     ImportDatabaseError,
     ImportStats,
     RowError,
@@ -37,14 +39,19 @@ from mailings.importing import (
     import_mailings,
     parse_row,
     save_batch,
+    validate_first_worksheet,
 )
 from mailings.management.commands.send_mailings import Command as SendCommand
 from mailings.models import Mailing
 from mailings.sending import (
     LEASE,
+    MAX_ATTEMPTS,
+    PermanentTransportError,
     SendDatabaseError,
     SendStats,
     claim_next,
+    delivery_idempotency_key,
+    retry_delay,
     send_email,
     send_mailings,
 )
@@ -211,6 +218,15 @@ class ImportTests(TestCase):
                 import_mailings(self.path)
         self.assertIsInstance(caught.exception.__cause__, InvalidFileException)
         self.assertEqual(caught.exception.stats, ImportStats())
+
+    def test_archive_with_too_many_parts_is_rejected_before_openpyxl(self) -> None:
+        source = BytesIO()
+        with ZipFile(source, "w", ZIP_DEFLATED) as archive:
+            for number in range(MAX_ARCHIVE_ENTRIES + 1):
+                archive.writestr(f"parts/{number}.xml", b"")
+        source.seek(0)
+        with self.assertRaisesRegex(InvalidFileException, "too many archive parts"):
+            validate_first_worksheet(source)
 
     def test_missing_first_worksheet_is_rejected_instead_of_importing_second(self) -> None:
         workbook = Workbook()
@@ -510,7 +526,8 @@ class ImportTests(TestCase):
         headers, data = tuple(sheet[1]), tuple(sheet[2])
         self.path.write_bytes(b"mock workbook")
 
-        def damaged_rows():
+        def damaged_rows(*, max_col: int):
+            self.assertEqual(max_col, MAX_COLUMNS)
             yield headers
             yield data
             raise ParseError("damaged worksheet")
@@ -553,7 +570,13 @@ class SendingTests(TestCase):
                     send_email(mailing)
         randint.assert_called_once_with(5, 20)
         sleep.assert_called_once_with(7)
-        self.assertEqual(logs.output, [f"INFO:mailings.sending:Send EMAIL mailing_id={mailing.pk}"])
+        key = delivery_idempotency_key(mailing)
+        self.assertEqual(
+            logs.output,
+            [f"INFO:mailings.sending:Send EMAIL mailing_id={mailing.pk} idempotency_key={key}"],
+        )
+        self.assertEqual(len(key), 64)
+        self.assertNotIn(mailing.external_id, key)
 
     def test_broken_transport_log_is_a_failed_send(self) -> None:
         class BrokenStream:
@@ -575,10 +598,11 @@ class SendingTests(TestCase):
         sleep.assert_called_once()
         mailing.refresh_from_db()
         self.assertEqual(
-            (mailing.status, mailing.last_error), (Mailing.Status.FAILED, "BrokenPipeError")
+            (mailing.status, mailing.last_error), (Mailing.Status.RETRYING, "BrokenPipeError")
         )
         self.assertIsNone(mailing.sent_at)
-        self.assertIn("Отправлено: 0; ошибок отправки: 1", output.getvalue())
+        self.assertIsNotNone(mailing.next_attempt_at)
+        self.assertIn("Отправлено: 0; назначено повторов: 1", output.getvalue())
         self.assertNotIn(
             "private", output.getvalue() + diagnostics.getvalue() + str(caught.exception)
         )
@@ -600,9 +624,10 @@ class SendingTests(TestCase):
             call_command(command, stdout=output)
         mailing.refresh_from_db()
         self.assertEqual(
-            (mailing.status, mailing.last_error), (Mailing.Status.FAILED, "ValueError")
+            (mailing.status, mailing.last_error), (Mailing.Status.RETRYING, "ValueError")
         )
-        self.assertIn("Отправлено: 0; ошибок отправки: 1", output.getvalue())
+        self.assertIsNotNone(mailing.next_attempt_at)
+        self.assertIn("Отправлено: 0; назначено повторов: 1", output.getvalue())
         self.assertEqual(str(caught.exception), "Очередь обработана с ошибками.")
 
     def test_success_and_repeat_do_not_resend(self) -> None:
@@ -617,24 +642,29 @@ class SendingTests(TestCase):
         self.assertIsNone(mailing.claim_token)
         self.assertIsNone(mailing.claimed_at)
 
-    def test_failure_is_isolated_and_requires_explicit_retry(self) -> None:
+    def test_transient_failure_is_isolated_and_retried_when_due(self) -> None:
         first, second = self.create_mailing(), self.create_mailing()
         with patch("mailings.sending.send_email", side_effect=[RuntimeError("secret"), None]):
-            with self.assertLogs("mailings.sending", level="ERROR") as logs:
-                self.assertEqual(send_mailings(), SendStats(1, 1, 0))
+            with self.assertLogs("mailings.sending", level="WARNING") as logs:
+                self.assertEqual(send_mailings(), SendStats(sent=1, retried=1))
         self.assertNotIn("secret", " ".join(logs.output))
         first.refresh_from_db()
         second.refresh_from_db()
-        self.assertEqual((first.status, first.last_error), (Mailing.Status.FAILED, "RuntimeError"))
+        self.assertEqual(
+            (first.status, first.last_error), (Mailing.Status.RETRYING, "RuntimeError")
+        )
+        self.assertGreater(first.next_attempt_at, timezone.now())
         self.assertEqual(second.status, Mailing.Status.SENT)
         with patch("mailings.sending.send_email") as transport:
             self.assertEqual(send_mailings(), SendStats())
             transport.assert_not_called()
-            self.assertEqual(send_mailings(retry_failed=True), SendStats(1, 0, 0))
+            Mailing.objects.filter(pk=first.pk).update(next_attempt_at=timezone.now())
+            self.assertEqual(send_mailings(), SendStats(sent=1))
         first.refresh_from_db()
         self.assertEqual(
             (first.status, first.attempts, first.last_error), (Mailing.Status.SENT, 2, "")
         )
+        self.assertIsNone(first.next_attempt_at)
 
     def test_expired_claim_is_recovered_while_active_claim_is_skipped(self) -> None:
         now = timezone.now()
@@ -683,15 +713,16 @@ class SendingTests(TestCase):
         ]
         # A guard limit makes a broken retry loop fail promptly rather than hang the test.
         with patch("mailings.sending.send_email", side_effect=RuntimeError("secret")) as transport:
-            with self.assertLogs("mailings.sending", level="ERROR"):
-                self.assertEqual(send_mailings(limit=4, retry_failed=True), SendStats(0, 3, 0))
+            with self.assertLogs("mailings.sending", level="WARNING"):
+                self.assertEqual(send_mailings(limit=4, retry_failed=True), SendStats(retried=3))
         self.assertEqual(
             [call.args[0].pk for call in transport.call_args_list],
             [mailing.pk for mailing in mailings],
         )
         for mailing in mailings:
             mailing.refresh_from_db()
-            self.assertEqual((mailing.status, mailing.attempts), (Mailing.Status.FAILED, 1))
+            self.assertEqual((mailing.status, mailing.attempts), (Mailing.Status.RETRYING, 1))
+            self.assertIsNotNone(mailing.next_attempt_at)
 
     def test_claim_returns_updated_fields(self) -> None:
         mailing = self.create_mailing(attempts=4, last_error="PreviousError")
@@ -715,8 +746,13 @@ class SendingTests(TestCase):
                 new_token = uuid4()
 
                 def steal_claim(
-                    claimed: Mailing, token: UUID = new_token, should_fail: bool = fail
+                    claimed: Mailing,
+                    *,
+                    idempotency_key: str,
+                    token: UUID = new_token,
+                    should_fail: bool = fail,
                 ) -> None:
+                    self.assertEqual(idempotency_key, delivery_idempotency_key(claimed))
                     Mailing.objects.filter(pk=claimed.pk).update(claim_token=token)
                     if should_fail:
                         raise RuntimeError("transport failed after lease was lost")
@@ -730,62 +766,67 @@ class SendingTests(TestCase):
                 self.assertIsNone(mailing.sent_at)
                 self.assertEqual(mailing.last_error, "")
 
-    def test_losing_conditional_claim_update_does_not_claim_twice(self) -> None:
-        mailing = self.create_mailing()
-        real_update = QuerySet.update
-        competitor_token = uuid4()
-        stolen = False
-
-        def competing_update(queryset: QuerySet, **values: object) -> int:
-            nonlocal stolen
-            if not stolen and values.get("status") == Mailing.Status.PROCESSING:
-                stolen = True
-                competitor_values = {**values, "claim_token": competitor_token}
-                self.assertEqual(real_update(queryset, **competitor_values), 1)
-            return real_update(queryset, **values)
-
-        with patch.object(QuerySet, "update", new=competing_update):
-            self.assertIsNone(claim_next(mailing.pk))
-            second = self.create_mailing()
-            claimed = claim_next(second.pk)
-            self.assertIsNotNone(claimed)
-            self.assertEqual(claimed.pk, second.pk)
-        mailing.refresh_from_db()
-        self.assertEqual(mailing.claim_token, competitor_token)
-        self.assertEqual(mailing.attempts, 1)
-
-    def test_claim_lost_before_reread_does_not_return_another_owner(self) -> None:
-        first, second = self.create_mailing(), self.create_mailing()
-        real_update = QuerySet.update
-        competitor_token = uuid4()
-        stolen = False
-
-        def steal_after_update(queryset: QuerySet, **values: object) -> int:
-            nonlocal stolen
-            changed = real_update(queryset, **values)
-            if changed and not stolen and values.get("status") == Mailing.Status.PROCESSING:
-                stolen = True
-                real_update(Mailing.objects.filter(pk=first.pk), claim_token=competitor_token)
-            return changed
-
-        with patch.object(QuerySet, "update", new=steal_after_update):
-            claimed = claim_next(second.pk)
+    def test_future_retry_is_not_claimed_until_due(self) -> None:
+        mailing = self.create_mailing(
+            status=Mailing.Status.RETRYING,
+            attempts=1,
+            next_attempt_at=timezone.now() + timedelta(minutes=1),
+        )
+        self.assertIsNone(claim_next(mailing.pk))
+        Mailing.objects.filter(pk=mailing.pk).update(next_attempt_at=timezone.now())
+        claimed = claim_next(mailing.pk)
         self.assertIsNotNone(claimed)
-        self.assertEqual(claimed.pk, second.pk)
-        self.assertNotEqual(claimed.claim_token, competitor_token)
-        first.refresh_from_db()
-        self.assertEqual(first.claim_token, competitor_token)
-        self.assertEqual(first.attempts, 1)
+        self.assertEqual((claimed.pk, claimed.attempts), (mailing.pk, 2))
+
+    def test_permanent_failure_is_terminal_without_retry(self) -> None:
+        mailing = self.create_mailing()
+        with patch("mailings.sending.send_email", side_effect=PermanentTransportError("private")):
+            with self.assertLogs("mailings.sending", level="ERROR") as logs:
+                self.assertEqual(send_mailings(), SendStats(failed=1))
+        self.assertNotIn("private", " ".join(logs.output))
+        mailing.refresh_from_db()
+        self.assertEqual(
+            (mailing.status, mailing.attempts, mailing.last_error),
+            (Mailing.Status.FAILED, 1, "PermanentTransportError"),
+        )
+        self.assertIsNone(mailing.next_attempt_at)
+
+    def test_expired_last_attempt_becomes_terminal_without_transport(self) -> None:
+        mailing = self.create_mailing(
+            status=Mailing.Status.PROCESSING,
+            attempts=MAX_ATTEMPTS,
+            claimed_at=timezone.now() - LEASE - timedelta(seconds=1),
+            claim_token=uuid4(),
+        )
+        with patch("mailings.sending.send_email") as transport:
+            self.assertEqual(send_mailings(), SendStats(failed=1))
+        transport.assert_not_called()
+        mailing.refresh_from_db()
+        self.assertEqual(
+            (mailing.status, mailing.attempts, mailing.last_error),
+            (Mailing.Status.FAILED, MAX_ATTEMPTS, "AttemptsExhausted"),
+        )
+
+    def test_retry_delay_is_exponential_jittered_and_capped(self) -> None:
+        with patch("mailings.sending.random.randint", side_effect=lambda low, high: high):
+            self.assertEqual(retry_delay(1), timedelta(seconds=37))
+            self.assertEqual(retry_delay(99), timedelta(seconds=3600))
 
     def test_limit_and_id_cutoff_bound_delivery(self) -> None:
         first, second = self.create_mailing(), self.create_mailing()
-        with patch("mailings.sending.send_email", side_effect=lambda _: self.create_mailing()):
+        with patch(
+            "mailings.sending.send_email",
+            side_effect=lambda _mailing, **_kwargs: self.create_mailing(),
+        ):
             self.assertEqual(send_mailings(limit=1), SendStats(1, 0, 0))
         first.refresh_from_db()
         second.refresh_from_db()
         self.assertEqual(first.status, Mailing.Status.SENT)
         self.assertEqual(second.status, Mailing.Status.PENDING)
-        with patch("mailings.sending.send_email", side_effect=lambda _: self.create_mailing()):
+        with patch(
+            "mailings.sending.send_email",
+            side_effect=lambda _mailing, **_kwargs: self.create_mailing(),
+        ):
             self.assertEqual(send_mailings(), SendStats(2, 0, 0))
         self.assertEqual(Mailing.objects.filter(status=Mailing.Status.PENDING).count(), 2)
 
@@ -860,13 +901,17 @@ class SendingTests(TestCase):
     def test_send_command_reports_failure_and_success(self) -> None:
         self.create_mailing()
         with patch("mailings.sending.send_email", side_effect=RuntimeError("secret")):
-            with self.assertLogs("mailings.sending", level="ERROR"):
+            with self.assertLogs("mailings.sending", level="WARNING"):
                 with self.assertRaises(CommandError):
                     call_command("send_mailings", stdout=StringIO())
         output = StringIO()
         with patch("mailings.sending.send_email"):
-            call_command("send_mailings", retry_failed=True, stdout=output)
-        self.assertIn("Отправлено: 1; ошибок отправки: 0; потеряно захватов: 0", output.getvalue())
+            Mailing.objects.update(next_attempt_at=timezone.now())
+            call_command("send_mailings", stdout=output)
+        self.assertIn(
+            "Отправлено: 1; назначено повторов: 0; окончательных ошибок: 0",
+            output.getvalue(),
+        )
 
 
 class PostgresConcurrencyTests(TransactionTestCase):
@@ -897,6 +942,44 @@ class PostgresConcurrencyTests(TransactionTestCase):
         counters = sorted((result.created, result.skipped) for result in results)
         self.assertEqual(counters, [(0, 1), (1, 0)])
         self.assertEqual(Mailing.objects.filter(external_id="same-id").count(), 1)
+
+    def test_concurrent_workers_claim_different_mailings(self) -> None:
+        mailings = [
+            Mailing.objects.create(
+                external_id=f"worker-{number}",
+                user_id=number,
+                email=f"worker-{number}@example.com",
+                subject="Subject",
+                message="Body",
+            )
+            for number in (1, 2)
+        ]
+        barrier = Barrier(2)
+        max_id = mailings[-1].pk
+
+        def claim() -> int | None:
+            connection = connections["default"]
+            try:
+                barrier.wait(timeout=5)
+                mailing = claim_next(max_id)
+                return mailing.pk if mailing else None
+            finally:
+                connection.close()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            claimed_ids = [
+                future.result(timeout=10) for future in [executor.submit(claim) for _ in range(2)]
+            ]
+
+        self.assertCountEqual(claimed_ids, [mailing.pk for mailing in mailings])
+        self.assertEqual(
+            Mailing.objects.filter(
+                status=Mailing.Status.PROCESSING,
+                claim_token__isnull=False,
+                claimed_at__isnull=False,
+            ).count(),
+            2,
+        )
 
 
 class AdminTests(TestCase):
@@ -965,4 +1048,13 @@ class AdminTests(TestCase):
                 subject="Subject",
                 message="Body",
                 status=Mailing.Status.SENT,
+            )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Mailing.objects.create(
+                external_id="invalid-retry",
+                user_id=1,
+                email="invalid@example.com",
+                subject="Subject",
+                message="Body",
+                status=Mailing.Status.RETRYING,
             )

@@ -14,7 +14,8 @@ class Command(BaseCommand):
 
     def report(self, stats: SendStats, unconfirmed: int = 0) -> None:
         self.stdout.write(
-            f"Отправлено: {stats.sent}; ошибок отправки: {stats.failed}; "
+            f"Отправлено: {stats.sent}; назначено повторов: {stats.retried}; "
+            f"окончательных ошибок: {stats.failed}; "
             f"потеряно захватов: {stats.lost}; "
             f"неподтверждённых результатов: {unconfirmed}"
         )
@@ -29,5 +30,5 @@ class Command(BaseCommand):
             self.report(exc.stats, exc.unconfirmed)
             raise CommandError("Сбой базы данных при обработке очереди.") from None
         self.report(stats)
-        if stats.failed or stats.lost:
+        if stats.retried or stats.failed or stats.lost:
             raise CommandError("Очередь обработана с ошибками.")

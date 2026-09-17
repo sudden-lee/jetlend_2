@@ -13,6 +13,7 @@ class MailingAdmin(admin.ModelAdmin):
         "email",
         "status",
         "attempts",
+        "next_attempt_at",
         "created_at",
         "sent_at",
     )
@@ -37,6 +38,7 @@ class MailingAdmin(admin.ModelAdmin):
         "sent_at",
         "claimed_at",
         "claim_token",
+        "next_attempt_at",
         "attempts",
         "last_error",
     )
@@ -52,6 +54,7 @@ class MailingAdmin(admin.ModelAdmin):
                     "status",
                     "attempts",
                     "last_error",
+                    "next_attempt_at",
                     "claim_token",
                     "claimed_at",
                 )

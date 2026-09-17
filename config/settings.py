@@ -3,6 +3,17 @@ from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
+
+def positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be a positive integer.") from exc
+    if value < 1:
+        raise ImproperlyConfigured(f"{name} must be a positive integer.")
+    return value
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
@@ -59,6 +70,14 @@ TEMPLATES = [
 ]
 WSGI_APPLICATION = "config.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+MAILINGS_LEASE_SECONDS = positive_int_env("MAILINGS_LEASE_SECONDS", 300)
+MAILINGS_MAX_ATTEMPTS = positive_int_env("MAILINGS_MAX_ATTEMPTS", 5)
+MAILINGS_RETRY_BASE_SECONDS = positive_int_env("MAILINGS_RETRY_BASE_SECONDS", 30)
+MAILINGS_RETRY_MAX_SECONDS = positive_int_env("MAILINGS_RETRY_MAX_SECONDS", 3600)
+if MAILINGS_RETRY_BASE_SECONDS > MAILINGS_RETRY_MAX_SECONDS:
+    raise ImproperlyConfigured(
+        "MAILINGS_RETRY_BASE_SECONDS must not exceed MAILINGS_RETRY_MAX_SECONDS."
+    )
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},

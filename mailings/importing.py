@@ -82,6 +82,22 @@ WORKBOOK_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 MAX_METADATA_BYTES = 10 * 1024 * 1024
+MAX_XLSX_BYTES = 128 * 1024 * 1024
+MAX_ARCHIVE_ENTRIES = 2_048
+MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_COLUMNS = 100
+
+
+def _validate_archive_limits(archive: ZipFile) -> None:
+    infos = archive.infolist()
+    if len(infos) > MAX_ARCHIVE_ENTRIES:
+        raise InvalidFileException("Workbook contains too many archive parts.")
+    if len({info.filename for info in infos}) != len(infos):
+        raise InvalidFileException("Workbook contains duplicate archive parts.")
+    if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
+        raise InvalidFileException("Workbook is too large after decompression.")
+    if any(info.flag_bits & 1 for info in infos):
+        raise InvalidFileException("Encrypted workbook parts are not supported.")
 
 
 def _read_package_xml(archive: ZipFile, name: str):
@@ -94,6 +110,7 @@ def _read_package_xml(archive: ZipFile, name: str):
 def validate_first_worksheet(source: BinaryIO) -> None:
     """Reject a package whose first declared worksheet part is missing."""
     with ZipFile(source) as archive:
+        _validate_archive_limits(archive)
         content_types = _read_package_xml(archive, "[Content_Types].xml")
         workbook_part = next(
             (
@@ -215,6 +232,7 @@ def save_batch(batch: list[Mailing], stats: ImportStats) -> None:
         "sent_at",
         "claimed_at",
         "claim_token",
+        "next_attempt_at",
         "attempts",
         "last_error",
     )
@@ -231,6 +249,7 @@ def save_batch(batch: list[Mailing], stats: ImportStats) -> None:
             mailing.sent_at,
             mailing.claimed_at,
             mailing.claim_token,
+            mailing.next_attempt_at,
             mailing.attempts,
             mailing.last_error,
         )
@@ -269,7 +288,11 @@ def import_mailings(path: Path, batch_size: int = 500) -> ImportStats:
     if path.suffix.lower() != ".xlsx":
         raise WorkbookError("Ожидается файл с расширением .xlsx.", stats)
     try:
+        if path.stat().st_size > MAX_XLSX_BYTES:
+            raise WorkbookError("XLSX-файл превышает допустимый размер.", stats)
         source = path.open("rb")
+    except WorkbookError:
+        raise
     except OSError as exc:
         raise WorkbookError("Не удалось открыть XLSX-файл.", stats) from exc
 
@@ -287,7 +310,7 @@ def import_mailings(path: Path, batch_size: int = 500) -> ImportStats:
                 raise WorkbookError("В файле нет листов.", stats)
             sheet = workbook.worksheets[0]
             sheet.reset_dimensions()
-            with closing(sheet.iter_rows()) as rows:
+            with closing(sheet.iter_rows(max_col=MAX_COLUMNS)) as rows:
                 try:
                     headers = next(rows, ())
                 except FILE_ERRORS as exc:
