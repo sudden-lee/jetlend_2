@@ -7,5 +7,9 @@ extend-exclude = [".uv-cache*"]
 select = ["E", "F", "I", "UP", "B", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests parse XML that they generated themselves only to build deliberately corrupt fixtures.
-"mailings/tests.py" = ["S314"]
+# pytest's `assert` is the standard way to state expectations in tests.
+"tests/*" = ["S101"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+testpaths = ["tests"]

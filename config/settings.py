@@ -3,17 +3,6 @@ from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
-
-def positive_int_env(name: str, default: int) -> int:
-    try:
-        value = int(os.environ.get(name, default))
-    except ValueError as exc:
-        raise ImproperlyConfigured(f"{name} must be a positive integer.") from exc
-    if value < 1:
-        raise ImproperlyConfigured(f"{name} must be a positive integer.")
-    return value
-
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
@@ -21,14 +10,7 @@ if not SECRET_KEY:
     if not DEBUG:
         raise ImproperlyConfigured("Set DJANGO_SECRET_KEY when DJANGO_DEBUG=0.")
     # Stable local sessions; production cannot reach this branch.
-    SECRET_KEY = "local-admin-development-key-do-not-use-in-production"  # noqa: S105  # nosec B105
-
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "")
-if not POSTGRES_PASSWORD:
-    if not DEBUG:
-        raise ImproperlyConfigured("Set POSTGRES_PASSWORD when DJANGO_DEBUG=0.")
-    # Matches compose.yaml for local development only.
-    POSTGRES_PASSWORD = "mailings-local"  # noqa: S105  # nosec B105
+    SECRET_KEY = "local-admin-development-key-do-not-use-in-production"  # noqa: S105
 
 ALLOWED_HOSTS = [
     host.strip()
@@ -70,14 +52,12 @@ TEMPLATES = [
 ]
 WSGI_APPLICATION = "config.wsgi.application"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
-MAILINGS_LEASE_SECONDS = positive_int_env("MAILINGS_LEASE_SECONDS", 300)
-MAILINGS_MAX_ATTEMPTS = positive_int_env("MAILINGS_MAX_ATTEMPTS", 5)
-MAILINGS_RETRY_BASE_SECONDS = positive_int_env("MAILINGS_RETRY_BASE_SECONDS", 30)
-MAILINGS_RETRY_MAX_SECONDS = positive_int_env("MAILINGS_RETRY_MAX_SECONDS", 3600)
-if MAILINGS_RETRY_BASE_SECONDS > MAILINGS_RETRY_MAX_SECONDS:
-    raise ImproperlyConfigured(
-        "MAILINGS_RETRY_BASE_SECONDS must not exceed MAILINGS_RETRY_MAX_SECONDS."
-    )
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+    }
+}
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -93,22 +73,6 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 SECURE_SSL_REDIRECT = not DEBUG
-SECURE_HSTS_SECONDS = int(os.environ.get("DJANGO_HSTS_SECONDS", "0")) if not DEBUG else 0
-SECURE_HSTS_INCLUDE_SUBDOMAINS = (
-    not DEBUG and os.environ.get("DJANGO_HSTS_INCLUDE_SUBDOMAINS", "0") == "1"
-)
-SECURE_HSTS_PRELOAD = not DEBUG and os.environ.get("DJANGO_HSTS_PRELOAD", "0") == "1"
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.environ.get("POSTGRES_DB", "mailings"),
-        "USER": os.environ.get("POSTGRES_USER", "mailings"),
-        "PASSWORD": POSTGRES_PASSWORD,
-        "HOST": os.environ.get("POSTGRES_HOST", "127.0.0.1"),
-        "PORT": os.environ.get("POSTGRES_PORT", "5432"),
-        "OPTIONS": {"connect_timeout": 5},
-    }
-}
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

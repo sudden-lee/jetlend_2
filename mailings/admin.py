@@ -12,56 +12,12 @@ class MailingAdmin(admin.ModelAdmin):
         "user_id",
         "email",
         "status",
-        "attempts",
-        "next_attempt_at",
         "created_at",
         "sent_at",
     )
-    list_display_links = ("id", "external_id")
-    list_filter = ("status", "created_at", "sent_at")
-    search_fields = ("=external_id", "=user_id", "email", "subject")
-    search_help_text = "Поиск по внешнему ID, ID пользователя, email или теме"
-    date_hierarchy = "created_at"
-    ordering = ("-created_at",)
-    list_per_page = 100
-    show_full_result_count = False
-    actions = None
-    readonly_fields = (
-        "id",
-        "external_id",
-        "user_id",
-        "email",
-        "subject",
-        "message",
-        "status",
-        "created_at",
-        "sent_at",
-        "claimed_at",
-        "claim_token",
-        "next_attempt_at",
-        "attempts",
-        "last_error",
-    )
-    fieldsets = (
-        (
-            "Письмо",
-            {"fields": ("id", "external_id", "user_id", "email", "subject", "message")},
-        ),
-        (
-            "Обработка",
-            {
-                "fields": (
-                    "status",
-                    "attempts",
-                    "last_error",
-                    "next_attempt_at",
-                    "claim_token",
-                    "claimed_at",
-                )
-            },
-        ),
-        ("Время", {"fields": ("created_at", "sent_at")}),
-    )
+    list_filter = ("status",)
+    search_fields = ("external_id", "email", "subject")
+    readonly_fields = [field.name for field in Mailing._meta.fields]
 
     def has_add_permission(self, request: HttpRequest) -> bool:
         return False
@@ -71,8 +27,3 @@ class MailingAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request: HttpRequest, obj: Mailing | None = None) -> bool:
         return False
-
-
-admin.site.site_header = "Управление рассылками"
-admin.site.site_title = "Рассылки"
-admin.site.index_title = "Очередь писем"
